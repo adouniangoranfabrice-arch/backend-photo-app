@@ -10,11 +10,6 @@ cloudinary.config(
     secure=True
 )
 
-print("Cloudinary cloud name :", settings.CLOUDINARY_CLOUD_NAME)
-print("Cloudinary API key :", settings.CLOUDINARY_API_KEY)
-print("Cloudinary secret chargé :", bool(settings.CLOUDINARY_API_SECRET))
-
-
 def upload_image(
     file,
     folder: str = "photiva",
