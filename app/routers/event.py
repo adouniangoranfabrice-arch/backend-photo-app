@@ -83,7 +83,9 @@ def event_to_response(event: dict) -> dict:
         "location": event.get("location"),
         "cover_photo": event.get("cover_photo"),
         "public_token": public_token,
-        "public_url": (f"{settings.FRONTEND_URL}public/galerie/{public_token}"),
+        "public_url": (
+            f"{settings.frontend_base_url}/public/galerie/{public_token}"
+        ),
         "is_public": event.get("is_public", True),
         "status": event.get("status", "ACTIVE"),
         "created_at": event["created_at"],

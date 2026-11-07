@@ -29,13 +29,19 @@ class Settings(BaseSettings):
         return value.strip().strip('"').strip("'").strip().rstrip("/")
 
     @property
+    def frontend_base_url(self) -> str:
+        """URL du frontend nettoyée, sans "/" final ni "www." parasite sur Vercel."""
+        url = self._clean_origin(self.FRONTEND_URL)
+        return url.replace("://www.", "://", 1) if url.endswith(".vercel.app") else url
+
+    @property
     def cors_origins(self) -> list[str]:
         origins = {
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             # Frontend de production (Vercel)
             "https://front-end-app-photo-ft19.vercel.app",
-            self._clean_origin(self.FRONTEND_URL),
+            self.frontend_base_url,
         }
         origins.update(
             self._clean_origin(origin)
