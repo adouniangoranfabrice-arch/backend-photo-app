@@ -34,7 +34,7 @@ class Settings(BaseSettings):
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             # Frontend de production (Vercel)
-            "https://www.front-end-app-photo-ft19.vercel.app",
+            "https://front-end-app-photo-ft19.vercel.app",
             self._clean_origin(self.FRONTEND_URL),
         }
         origins.update(
