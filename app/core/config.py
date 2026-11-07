@@ -23,19 +23,29 @@ class Settings(BaseSettings):
     # ex. "https://front-end-app-photo.*\.vercel\.app"
     CORS_ORIGIN_REGEX: str | None = None
 
+    @staticmethod
+    def _clean_origin(value: str) -> str:
+        # Retire espaces, guillemets et "/" final : "https://x.app/" -> https://x.app
+        return value.strip().strip('"').strip("'").strip().rstrip("/")
+
     @property
     def cors_origins(self) -> list[str]:
         origins = {
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            self.FRONTEND_URL.strip().rstrip("/"),
+            self._clean_origin(self.FRONTEND_URL),
         }
         origins.update(
-            origin.strip().rstrip("/")
+            self._clean_origin(origin)
             for origin in self.CORS_ORIGINS.split(",")
-            if origin.strip()
         )
         return sorted(o for o in origins if o)
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        if not self.CORS_ORIGIN_REGEX:
+            return None
+        return self._clean_origin(self.CORS_ORIGIN_REGEX) or None
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: str

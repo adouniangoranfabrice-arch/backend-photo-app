@@ -29,10 +29,14 @@ app = FastAPI(
 # CORS
 # =========================
 
+# Visible dans les logs Render au démarrage
+print(f"[CORS] Origines autorisées : {settings.cors_origins}", flush=True)
+print(f"[CORS] Regex autorisée : {settings.cors_origin_regex}", flush=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
