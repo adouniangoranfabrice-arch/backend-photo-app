@@ -6,19 +6,24 @@ import cloudinary
 import cloudinary.uploader
 import app.core.cloudinary
 
+from app.services.activity_logger import create_activity_log
+from app.services.activity_actions import DELETE_PHOTO
+
 from fastapi import (
     APIRouter,
     Depends,
     File,
     HTTPException,
     UploadFile,
+    Request,
     status,
+    Response
 )
 
 from app.core.database import (
     events_collection,
     photos_collection,
-    photographers_collection,
+    users_collection,
 )
 
 from app.dependencies.auth import require_role
@@ -56,27 +61,23 @@ MAX_FILE_SIZE = 30 * 1024 * 1024  # 10 MB
 # UTILITAIRE : RÉCUPÉRER LE PHOTOGRAPHE CONNECTÉ
 # ============================================================
 
-def get_photographer_from_user(current_user: dict) -> dict:
+
+def get_photographer_from_user(current_user: dict) -> str:
     """
-    Récupère le profil photographe associé
-    à l'utilisateur actuellement connecté.
+    Récupère l'identifiant MongoDB de l'utilisateur connecté.
     """
 
-    user_id = str(current_user["_id"])
+    user = users_collection.find_one({
+        "_id": current_user["_id"]
+    })
 
-    photographer = photographers_collection.find_one(
-        {
-            "user_id": user_id
-        }
-    )
-
-    if not photographer:
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profil photographe introuvable",
+            detail="Utilisateur introuvable"
         )
 
-    return photographer
+    return str(user["_id"])
 
 
 # ============================================================
@@ -166,72 +167,66 @@ def cleanup_cloudinary_images(
 # UPLOAD MULTIPLE PHOTOS
 # ============================================================
 
+
 @router.post(
     "/events/{event_id}/upload",
     response_model=list[PhotoResponse],
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_photos(
+    request: Request,
     event_id: str,
-
     files: list[UploadFile] = File(...),
-
     current_user=Depends(
-        require_role(
-            UserRole.PHOTOGRAPHER.value
-        )
+        require_role(UserRole.PHOTOGRAPHER.value)
     ),
 ):
-
-    # ========================================================
-    # 1. VÉRIFIER L'ID DE L'ÉVÉNEMENT
-    # ========================================================
-
+    # 1. Vérifier l'identifiant de l'événement
     if not ObjectId.is_valid(event_id):
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ID événement invalide",
         )
 
-    # ========================================================
-    # 2. VÉRIFIER QU'IL Y A DES FICHIERS
-    # ========================================================
-
+    # 2. Vérifier les fichiers
     if not files:
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Aucune photo envoyée",
         )
 
-    # ========================================================
-    # 3. RÉCUPÉRER LE PHOTOGRAPHE
-    # ========================================================
+    # 3. Récupérer l'utilisateur connecté
+    user_id = str(current_user["_id"])
 
-    photographer = get_photographer_from_user(
-        current_user
-    )
+    user = users_collection.find_one({
+        "_id": current_user["_id"]
+    })
 
-    photographer_id = str(
-        photographer["_id"]
-    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur introuvable",
+        )
 
-    # ========================================================
-    # 4. VÉRIFIER QUE L'ÉVÉNEMENT APPARTIENT
-    #    AU PHOTOGRAPHE
-    # ========================================================
+    # Récupérer le profil photographe
+    photographer = get_photographer_from_user(current_user)
 
-    event = events_collection.find_one(
-        {
-            "_id": ObjectId(event_id),
+    if not photographer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Profil photographe introuvable",
+        )
 
-            "photographer_id": photographer_id,
-        }
-    )
+    # Identifiant utilisé pour les statistiques photographe
+    photographer_id = user_id
+
+    # 4. Vérifier que l'événement appartient à l'utilisateur
+    event = events_collection.find_one({
+        "_id": ObjectId(event_id),
+        "user_id": user_id,
+    })
 
     if not event:
-
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
@@ -240,193 +235,87 @@ async def upload_photos(
             ),
         )
 
-    # ========================================================
-    # 5. LISTES DE CONTRÔLE
-    # ========================================================
-
     created_photos = []
-
     uploaded_public_ids = []
 
-    # ========================================================
-    # 6. TRAITER CHAQUE PHOTO
-    # ========================================================
-
     try:
-
+        # 5. Traiter chaque photo
         for file in files:
-
-            # =================================================
-            # 6.1 NOM DU FICHIER
-            # =================================================
-
             if not file.filename:
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Nom de fichier invalide",
                 )
 
-            # =================================================
-            # 6.2 EXTENSION
-            # =================================================
-
-            extension = Path(
-                file.filename
-            ).suffix.lower()
+            # Vérifier l'extension
+            extension = Path(file.filename).suffix.lower()
 
             if extension not in ALLOWED_EXTENSIONS:
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Extension non autorisée pour "
-                        f"{file.filename}. "
+                        f"Extension non autorisée pour {file.filename}. "
                         f"Extensions acceptées : "
                         f"{', '.join(ALLOWED_EXTENSIONS)}"
                     ),
                 )
 
-            # =================================================
-            # 6.3 TYPE MIME
-            # =================================================
-
+            # Vérifier le type MIME
             if file.content_type not in ALLOWED_CONTENT_TYPES:
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Format non autorisé pour "
-                        f"{file.filename}"
-                    ),
+                    detail=f"Format non autorisé pour {file.filename}",
                 )
 
-            # =================================================
-            # 6.4 LIRE LE FICHIER
-            # =================================================
-
+            # Lire le fichier
             file_content = await file.read()
-
-            # =================================================
-            # 6.5 VÉRIFIER QUE LE FICHIER N'EST PAS VIDE
-            # =================================================
-
             file_size = len(file_content)
 
             if file_size == 0:
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Le fichier "
-                        f"{file.filename} est vide"
-                    ),
+                    detail=f"Le fichier {file.filename} est vide",
                 )
-
-            # =================================================
-            # 6.6 VÉRIFIER LA TAILLE
-            # =================================================
 
             if file_size > MAX_FILE_SIZE:
-
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"{file.filename} dépasse "
-                        f"la limite de 10 MB"
-                    ),
+                    detail=f"{file.filename} dépasse la limite de 10 MB",
                 )
 
-            # =================================================
-            # 6.7 UPLOAD CLOUDINARY
-            # =================================================
-
+            # 6. Envoyer la photo vers Cloudinary
             try:
-
                 result = cloudinary.uploader.upload(
                     file_content,
-
-                    folder=(
-                        f"photiva/events/{event_id}"
-                    ),
-
+                    folder=f"photiva/events/{event_id}",
                     resource_type="image",
-
                     secure=True,
-
                     unique_filename=True,
-
                     overwrite=False,
                 )
-
-            except Exception as e:
-
+            except Exception:
                 raise HTTPException(
-                    status_code=(
-                        status.HTTP_500_INTERNAL_SERVER_ERROR
-                    ),
-                    detail=(
-                        f"Erreur Cloudinary pour "
-                        f"{file.filename} : {str(e)}"
-                    ),
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Erreur Cloudinary pour {file.filename}",
                 )
 
-            # =================================================
-            # 6.8 RÉCUPÉRER LES INFORMATIONS CLOUDINARY
-            # =================================================
-
-            public_id = result.get(
-                "public_id"
-            )
-
-            file_url = result.get(
-                "secure_url"
-            )
-
-            width = result.get(
-                "width"
-            )
-
-            height = result.get(
-                "height"
-            )
-
-            image_format = result.get(
-                "format"
-            )
-
-            # =================================================
-            # 6.9 VÉRIFIER LA RÉPONSE CLOUDINARY
-            # =================================================
+            public_id = result.get("public_id")
+            file_url = result.get("secure_url")
 
             if not public_id or not file_url:
-
                 raise HTTPException(
-                    status_code=(
-                        status.HTTP_500_INTERNAL_SERVER_ERROR
-                    ),
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=(
                         "Cloudinary n'a pas retourné "
                         "les informations nécessaires"
                     ),
                 )
 
-            # =================================================
-            # 6.10 AJOUTER LE PUBLIC_ID AU ROLLBACK
-            # =================================================
+            uploaded_public_ids.append(public_id)
 
-            uploaded_public_ids.append(
-                public_id
-            )
-
-            # =================================================
-            # 6.11 CRÉER L'URL MINIATURE
-            # =================================================
-
+            # 7. Générer la miniature
             thumbnail_url = (
-                cloudinary.CloudinaryImage(
-                    public_id
-                ).build_url(
+                cloudinary.CloudinaryImage(public_id).build_url(
                     transformation=[
                         {
                             "width": 400,
@@ -440,145 +329,98 @@ async def upload_photos(
                 )
             )
 
-            # =================================================
-            # 6.12 DATE
-            # =================================================
+            now = datetime.now(timezone.utc)
 
-            now = datetime.now(
-                timezone.utc
-            )
-
-            # =================================================
-            # 6.13 DOCUMENT MONGODB
-            # =================================================
-
+            # 8. Créer le document photo
             photo = {
+                # Relation avec users
+                "user_id": user_id,
 
+                # Relation avec events
                 "event_id": event_id,
 
+                # Identifiant pour les statistiques photographe
                 "photographer_id": photographer_id,
 
                 "file_url": file_url,
-
                 "thumbnail_url": thumbnail_url,
-
                 "public_id": public_id,
-
                 "original_name": file.filename,
-
                 "file_size": file_size,
-
                 "mime_type": file.content_type,
-
-                "width": width,
-
-                "height": height,
-
-                "format": image_format,
-
+                "width": result.get("width"),
+                "height": result.get("height"),
+                "format": result.get("format"),
                 "status": "ACTIVE",
-
                 "created_at": now,
             }
 
-            # =================================================
-            # 6.14 ENREGISTRER DANS MONGODB
-            # =================================================
+            # 9. Enregistrer dans MongoDB
+            insert_result = photos_collection.insert_one(photo)
+            photo["_id"] = insert_result.inserted_id
 
-            insert_result = photos_collection.insert_one(
-                photo
-            )
-
-            photo["_id"] = (
-                insert_result.inserted_id
-            )
-
-            # =================================================
-            # 6.15 AJOUTER À LA LISTE DE RÉPONSE
-            # =================================================
-
-            created_photos.append(
-                photo
-            )
-
-    except HTTPException:
-
-        # ====================================================
-        # ROLLBACK CLOUDINARY
-        # ====================================================
-
-        cleanup_cloudinary_images(
-            uploaded_public_ids
-        )
-
-        # Supprimer les documents MongoDB déjà créés
-        # pendant cette opération
-
-        for photo in created_photos:
-
-            try:
-
-                photos_collection.delete_one(
-                    {
-                        "_id": photo["_id"]
-                    }
-                )
-
-            except Exception:
-                pass
-
-        raise
+            created_photos.append(photo)
 
     except Exception as e:
-
-        # ====================================================
-        # ROLLBACK CLOUDINARY
-        # ====================================================
-
-        cleanup_cloudinary_images(
-            uploaded_public_ids
-        )
-
-        # ====================================================
-        # ROLLBACK MONGODB
-        # ====================================================
-
+        # 10. Annuler les documents MongoDB créés
         for photo in created_photos:
-
             try:
-
-                photos_collection.delete_one(
-                    {
-                        "_id": photo["_id"]
-                    }
-                )
-
+                photos_collection.delete_one({
+                    "_id": photo["_id"]
+                })
             except Exception:
                 pass
 
+        # Supprimer les images envoyées vers Cloudinary
+        cleanup_cloudinary_images(uploaded_public_ids)
+
+        if isinstance(e, HTTPException):
+            raise
+
         raise HTTPException(
-            status_code=(
-                status.HTTP_500_INTERNAL_SERVER_ERROR
-            ),
-            detail=(
-                "Une erreur est survenue "
-                "pendant l'upload des photos"
-            ),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Une erreur est survenue pendant l'upload des photos",
         )
 
-    # ========================================================
-    # 7. RÉPONSE
-    # ========================================================
+    # 11. Enregistrer l'activité
+    photo_count = len(created_photos)
 
+    photo_ids = [
+        str(photo["_id"])
+        for photo in created_photos
+    ]
+
+    create_activity_log(
+        user_id=user_id,
+        photographer_id=photographer_id,
+        user_role=current_user.get("role"),
+        action="UPLOAD_PHOTO",
+        resource="photo",
+        description=f"a importé {photo_count} photos",
+        target=event.get("name"),
+        ip_address=(
+            request.client.host
+            if request.client
+            else None
+        ),
+        user_agent=request.headers.get("user-agent"),
+        metadata={
+            "event_id": event_id,
+            "photo_count": photo_count,
+            "photo_ids": photo_ids,
+        },
+    )
+
+    # 12. Retourner les photos créées
     return [
         photo_to_response(photo)
         for photo in created_photos
     ]
 
-
 # ============================================================
 # RÉCUPÉRER LES PHOTOS D'UN ÉVÉNEMENT
 # ============================================================
+
 
 @router.get(
     "/events/{event_id}",
@@ -593,71 +435,65 @@ def get_event_photos(
         )
     ),
 ):
-
     # ========================================================
-    # 1. VÉRIFIER L'ID
+    # 1. VÉRIFIER L'ID DE L'ÉVÉNEMENT
     # ========================================================
 
     if not ObjectId.is_valid(event_id):
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ID événement invalide",
         )
 
     # ========================================================
-    # 2. PHOTOGRAPHE
+    # 2. RÉCUPÉRER L'ID DE L'UTILISATEUR CONNECTÉ
     # ========================================================
 
-    photographer = get_photographer_from_user(
+    user_id = get_photographer_from_user(
         current_user
     )
 
-    photographer_id = str(
-        photographer["_id"]
-    )
+    # Dans ton application, l'identifiant photographe
+    # correspond à l'identifiant du compte utilisateur.
+    photographer_id = user_id
 
     # ========================================================
-    # 3. VÉRIFIER L'ÉVÉNEMENT
+    # 3. VÉRIFIER QUE L'ÉVÉNEMENT APPARTIENT À L'UTILISATEUR
     # ========================================================
 
-    event = events_collection.find_one(
-        {
-            "_id": ObjectId(event_id),
-
-            "photographer_id": photographer_id,
-        }
-    )
+    event = events_collection.find_one({
+        "_id": ObjectId(event_id),
+        "user_id": user_id,
+    })
 
     if not event:
-
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Événement introuvable",
+            detail="Événement introuvable ou accès non autorisé",
         )
 
     # ========================================================
-    # 4. RÉCUPÉRER LES PHOTOS
+    # 4. RÉCUPÉRER LES PHOTOS DE CET ÉVÉNEMENT
     # ========================================================
 
-    photos = photos_collection.find(
-        {
-            "event_id": event_id,
+    photos = photos_collection.find({
+        "event_id": event_id,
+        "user_id": user_id,
+        "status": "ACTIVE",
+    }).sort([
+        # De la première photo importée à la dernière
+        ("created_at", 1),
+        ("_id", 1),
+    ])
 
-            "photographer_id": photographer_id,
-
-            "status": "ACTIVE",
-        }
-    ).sort(
-        "created_at",
-        -1,
-    )
+    # ========================================================
+    # 5. RETOURNER LES PHOTOS
+    # ========================================================
 
     return [
         photo_to_response(photo)
         for photo in photos
     ]
-
 
 # ============================================================
 # SUPPRIMER UNE PHOTO
@@ -669,128 +505,147 @@ def get_event_photos(
 )
 def delete_photo(
     photo_id: str,
-
+    request: Request,
     current_user=Depends(
-        require_role(
-            UserRole.PHOTOGRAPHER.value
-        )
+        require_role(UserRole.PHOTOGRAPHER.value)
     ),
 ):
-
-    # ========================================================
-    # 1. VÉRIFIER L'ID
-    # ========================================================
+    # =====================================================
+    # 1. VÉRIFIER L'ID DE LA PHOTO
+    # =====================================================
 
     if not ObjectId.is_valid(photo_id):
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ID photo invalide",
+            detail="ID de photo invalide.",
         )
 
-    # ========================================================
-    # 2. RÉCUPÉRER LE PHOTOGRAPHE
-    # ========================================================
+    # =====================================================
+    # 2. RÉCUPÉRER L'UTILISATEUR CONNECTÉ
+    # =====================================================
 
-    photographer = get_photographer_from_user(
-        current_user
-    )
+    user = users_collection.find_one({
+        "_id": current_user["_id"]
+    })
 
-    photographer_id = str(
-        photographer["_id"]
-    )
-
-    # ========================================================
-    # 3. RÉCUPÉRER LA PHOTO
-    # ========================================================
-
-    photo = photos_collection.find_one(
-        {
-            "_id": ObjectId(photo_id),
-
-            "photographer_id": photographer_id,
-        }
-    )
-
-    if not photo:
-
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Photo introuvable",
+            detail="Utilisateur introuvable.",
         )
 
-    # ========================================================
-    # 4. SUPPRIMER DE CLOUDINARY
-    # ========================================================
+    user_id = str(user["_id"])
 
-    public_id = photo.get(
-        "public_id"
+    # Dans ton application, le photographe utilise
+    # l'identifiant de son compte utilisateur.
+    photographer_id = user_id
+
+    # =====================================================
+    # 3. RÉCUPÉRER LA PHOTO ET VÉRIFIER SON PROPRIÉTAIRE
+    # =====================================================
+
+    photo = photos_collection.find_one({
+        "_id": ObjectId(photo_id),
+        "user_id": user_id,
+    })
+
+    if not photo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Photo introuvable ou accès non autorisé.",
+        )
+
+    # =====================================================
+    # 4. RÉCUPÉRER LES INFORMATIONS POUR LE LOG
+    # =====================================================
+
+    photo_name = photo.get(
+        "original_name",
+        "Photo sans nom",
     )
 
+    event_id = photo.get("event_id")
+    public_id = photo.get("public_id")
+
+    # =====================================================
+    # 5. SUPPRIMER L'IMAGE DE CLOUDINARY
+    # =====================================================
+
     if public_id:
-
         try:
-
             result = cloudinary.uploader.destroy(
                 public_id,
-
                 resource_type="image",
-
                 invalidate=True,
             )
 
-            cloudinary_result = result.get(
-                "result"
-            )
-
-            if cloudinary_result not in {
-                "ok",
-                "not found",
-            }:
-
+            if result.get("result") not in ("ok", "not found"):
                 raise HTTPException(
-                    status_code=(
-                        status.HTTP_500_INTERNAL_SERVER_ERROR
-                    ),
+                    status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=(
                         "Impossible de supprimer "
-                        "la photo de Cloudinary"
+                        "l'image de Cloudinary."
                     ),
                 )
 
         except HTTPException:
-
             raise
 
-        except Exception as e:
-
+        except Exception:
             raise HTTPException(
-                status_code=(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR
-                ),
+                status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
-                    f"Erreur Cloudinary : {str(e)}"
+                    "Erreur lors de la suppression "
+                    "de l'image sur Cloudinary."
                 ),
             )
 
-    # ========================================================
-    # 5. SUPPRIMER DE MONGODB
-    # ========================================================
+    # =====================================================
+    # 6. SUPPRIMER LA PHOTO DE MONGODB
+    # =====================================================
 
-    delete_result = photos_collection.delete_one(
-        {
-            "_id": ObjectId(photo_id),
-
-            "photographer_id": photographer_id,
-        }
-    )
+    delete_result = photos_collection.delete_one({
+        "_id": ObjectId(photo_id),
+        "user_id": user_id,
+    })
 
     if delete_result.deleted_count == 0:
-
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="La photo n'a pas pu être supprimée",
+            detail="Photo introuvable.",
         )
 
-    # 204 = aucune réponse
-    return None
+    # =====================================================
+    # 7. ENREGISTRER L'ACTIVITÉ
+    # =====================================================
+
+    try:
+        create_activity_log(
+            user_id=user_id,
+            photographer_id=photographer_id,
+            user_role=current_user.get("role"),
+            action=DELETE_PHOTO,
+            resource="photo",
+            resource_id=photo_id,
+            description="a supprimé la photo",
+            target=photo_name,
+            ip_address=(
+                request.client.host
+                if request.client
+                else None
+            ),
+            user_agent=request.headers.get("user-agent"),
+            metadata={
+                "event_id": event_id,
+                "photo_name": photo_name,
+                "public_id": public_id,
+            },
+        )
+    except Exception:
+        # La photo a déjà été supprimée.
+        # Une erreur de journalisation ne doit pas
+        # faire croire que la suppression a échoué.
+        pass
+
+    # HTTP 204 : aucune réponse
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

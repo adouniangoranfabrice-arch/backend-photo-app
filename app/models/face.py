@@ -1,12 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 
 class FaceModel(BaseModel):
+    id: str
+
     photo_id: str
     event_id: str
-    photographer_id: str
 
     person_id: str | None = None
 
@@ -22,6 +23,4 @@ class FaceModel(BaseModel):
 
     embedding: list[float] | None = None
 
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime

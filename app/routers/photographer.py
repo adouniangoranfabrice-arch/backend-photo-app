@@ -1,33 +1,9 @@
-# from fastapi import APIRouter, Depends
-
-# from app.dependencies.auth import require_role
-# from app.models.users import UserRole
-
-
-# router = APIRouter(
-#     prefix="/photographers",
-#     tags=["Photographers"]
-# )
-
-
-# @router.get("/dashboard")
-# def photographer_dashboard(
-#     current_user=Depends(
-#         require_role(UserRole.PHOTOGRAPHER.value)
-#     )
-# ):
-#     return {
-#         "message": "Bienvenue dans votre espace photographe",
-#         "user_id": str(current_user["_id"]),
-#         "role": current_user["role"]
-#     }
-
 from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.core.database import photographers_collection
+from app.core.database import users_collection
 from app.dependencies.auth import require_role
 from app.models.users import UserRole
 from app.schemas.photographer import (
@@ -35,6 +11,8 @@ from app.schemas.photographer import (
     PhotographerUpdate,
     PhotographerResponse,
 )
+
+from app.services.activity_logger import create_activity_log
 
 
 router = APIRouter(
@@ -58,7 +36,7 @@ def create_photographer_profile(
     user_id = str(current_user["_id"])
 
     # Vérifier si le profil existe déjà
-    existing_profile = photographers_collection.find_one({
+    existing_profile = users_collection.find_one({
         "user_id": user_id
     })
 
@@ -83,7 +61,7 @@ def create_photographer_profile(
         "updated_at": now
     }
 
-    result = photographers_collection.insert_one(
+    result = users_collection.insert_one(
         photographer
     )
 
@@ -114,7 +92,7 @@ def get_my_photographer_profile(
 
     user_id = str(current_user["_id"])
 
-    photographer = photographers_collection.find_one({
+    photographer = users_collection.find_one({
         "user_id": user_id
     })
 
@@ -152,7 +130,7 @@ def update_my_photographer_profile(
 
     user_id = str(current_user["_id"])
 
-    photographer = photographers_collection.find_one({
+    photographer = users_collection.find_one({
         "user_id": user_id
     })
 
@@ -171,7 +149,7 @@ def update_my_photographer_profile(
         "updated_at": datetime.now(timezone.utc)
     }
 
-    photographers_collection.update_one(
+    users_collection.update_one(
         {
             "_id": photographer["_id"]
         },
@@ -180,7 +158,7 @@ def update_my_photographer_profile(
         }
     )
 
-    updated = photographers_collection.find_one({
+    updated = users_collection.find_one({
         "_id": photographer["_id"]
     })
 
@@ -211,7 +189,7 @@ def delete_my_photographer_profile(
 
     user_id = str(current_user["_id"])
 
-    result = photographers_collection.delete_one({
+    result = users_collection.delete_one({
         "user_id": user_id
     })
 

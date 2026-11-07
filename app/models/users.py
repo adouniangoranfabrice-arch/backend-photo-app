@@ -7,7 +7,6 @@ from pydantic import BaseModel, EmailStr, Field
 class UserRole(str, Enum):
     ADMIN = "ADMIN"
     PHOTOGRAPHER = "PHOTOGRAPHER"
-    USER = "USER"
 
 
 class UserModel(BaseModel):
@@ -18,6 +17,12 @@ class UserModel(BaseModel):
     phone: str | None = Field(default=None, max_length=30)
     role: UserRole = UserRole.PHOTOGRAPHER
     is_active: bool = True
+    business_name: str | None
+    bio: str | None
+    city: str | None
+    phone: str | None
+    website: str | None
+    is_active: bool
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

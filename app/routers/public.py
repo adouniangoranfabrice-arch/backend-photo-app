@@ -1,77 +1,3 @@
-# from fastapi import (
-#     APIRouter,
-#     HTTPException,
-#     Request,
-#     status
-# )
-
-# from app.core.database import events_collection
-
-
-# router = APIRouter(
-#     prefix="/public",
-#     tags=["Public"]
-# )
-
-
-# @router.get(
-#     "/events/{public_token}"
-# )
-# def get_public_event(
-#     public_token: str,
-#     request: Request
-# ):
-
-#     event = events_collection.find_one({
-#         "public_token": public_token,
-#         "is_public": True,
-#         "status": "ACTIVE"
-#     })
-
-
-#     if not event:
-
-#         raise HTTPException(
-#             status_code=status.HTTP_404_NOT_FOUND,
-#             detail="Événement introuvable ou non public"
-#         )
-
-
-#     cover_photo_url = None
-
-
-#     if event.get("cover_photo"):
-
-#         cover_photo_url = (
-#             str(request.base_url).rstrip("/")
-#             + event["cover_photo"]
-#         )
-
-
-#     return {
-#         "id": str(event["_id"]),
-
-#         "name": event["name"],
-
-#         "description": event.get(
-#             "description"
-#         ),
-
-#         "event_type": event["event_type"],
-
-#         "event_date": event.get(
-#             "event_date"
-#         ),
-
-#         "location": event.get(
-#             "location"
-#         ),
-
-#         "cover_photo": cover_photo_url,
-
-#         "public_token": event["public_token"]
-#     }
-
 from fastapi import APIRouter, HTTPException, Request, status
 from app.core.database import (
     events_collection,
@@ -133,10 +59,11 @@ def get_public_event(
     photos_cursor = photos_collection.find({
         "event_id": event_id,
         "status": "ACTIVE"
-    }).sort(
-        "created_at",
-        -1
-    )
+    }).sort([
+        # De la première photo importée à la dernière
+        ("created_at", 1),
+        ("_id", 1),
+    ])
 
     photos = []
 

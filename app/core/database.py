@@ -16,10 +16,31 @@ client = MongoClient(
 database = client[settings.MONGODB_DATABASE]
 
 users_collection = database["users"]
-photographers_collection = database["photographers"]
 events_collection = database["events"]
 photos_collection = database["photos"]
 faces_collection = database["faces"]
+activity_logs_collection = database["activity_logs"]
+
+
+activity_logs_collection.create_index(
+    [("created_at", -1)]
+)
+
+activity_logs_collection.create_index(
+    [("user_id", 1)]
+)
+
+activity_logs_collection.create_index(
+    [("photographer_id", 1)]
+)
+
+activity_logs_collection.create_index(
+    [("action", 1)]
+)
+
+activity_logs_collection.create_index(
+    [("resource", 1)]
+)
 
 def get_database():
     return database

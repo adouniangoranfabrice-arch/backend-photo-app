@@ -14,10 +14,6 @@ pwd_context = CryptContext(
 
 def hash_password(password: str) -> str:
 
-    print("PASSWORD:", password)
-    print("TYPE:", type(password))
-    print("BYTES:", len(password.encode("utf-8")))
-
     if len(password.encode("utf-8")) > 72:
         raise ValueError(
             "Le mot de passe ne doit pas dépasser 72 octets."

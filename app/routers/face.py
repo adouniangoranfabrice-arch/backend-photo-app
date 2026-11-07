@@ -10,12 +10,10 @@ from bson import ObjectId
 from app.core.database import (
     faces_collection,
     photos_collection,
-    events_collection,
-    photographers_collection
+    events_collection
 )
 
 from app.dependencies.auth import get_current_user
-from app.models.users import UserRole
 from app.schemas.face import FaceResponse
 from app.models.face import FaceModel
 
@@ -25,14 +23,17 @@ router = APIRouter(
     tags=["Faces"]
 )
 
-# Ajouter
-def face_to_response(face: dict):
+
+# ============================================================
+# Conversion MongoDB → Response
+# ============================================================
+
+def face_to_response(face: dict) -> dict:
     return {
         "id": str(face["_id"]),
 
         "photo_id": face["photo_id"],
         "event_id": face["event_id"],
-        "photographer_id": face["photographer_id"],
 
         "person_id": face.get("person_id"),
 
@@ -48,6 +49,11 @@ def face_to_response(face: dict):
         "created_at": face["created_at"]
     }
 
+
+# ============================================================
+# CRÉER UNE FACE
+# ============================================================
+
 @router.post(
     "",
     response_model=FaceResponse,
@@ -57,37 +63,31 @@ def create_face(
     face: FaceModel,
     current_user=Depends(get_current_user)
 ):
-    # Vérifier que l'utilisateur est photographe
-    if current_user.get("role") != UserRole.PHOTOGRAPHER.value:
+
+    # --------------------------------------------------------
+    # Vérifier l'ID de la photo
+    # --------------------------------------------------------
+
+    if not ObjectId.is_valid(face.photo_id):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Accès réservé aux photographes"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID photo invalide"
         )
 
-    user_id = str(current_user["_id"])
+    # --------------------------------------------------------
+    # Vérifier l'ID de l'événement
+    # --------------------------------------------------------
 
-    # Vérifier le profil photographe
-    photographer = photographers_collection.find_one({
-        "user_id": user_id
-    })
-
-    if not photographer:
+    if not ObjectId.is_valid(face.event_id):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profil photographe introuvable"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID événement invalide"
         )
 
-    photographer_id = str(photographer["_id"])
+    # --------------------------------------------------------
+    # Vérifier que la photo existe
+    # --------------------------------------------------------
 
-    # Vérifier que la face appartient bien
-    # au photographe connecté
-    if face.photographer_id != photographer_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cette face n'appartient pas à votre compte"
-        )
-
-    # Vérifier la photo
     photo = photos_collection.find_one({
         "_id": ObjectId(face.photo_id)
     })
@@ -98,14 +98,10 @@ def create_face(
             detail="Photo introuvable"
         )
 
-    # Vérifier que la photo appartient au bon photographe
-    if photo["photographer_id"] != photographer_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cette photo ne vous appartient pas"
-        )
+    # --------------------------------------------------------
+    # Vérifier que l'événement existe
+    # --------------------------------------------------------
 
-    # Vérifier l'événement
     event = events_collection.find_one({
         "_id": ObjectId(face.event_id)
     })
@@ -116,25 +112,49 @@ def create_face(
             detail="Événement introuvable"
         )
 
-    # Vérifier la cohérence photo / événement
-    if photo["event_id"] != face.event_id:
+    # --------------------------------------------------------
+    # Vérifier que la photo appartient à l'événement
+    # --------------------------------------------------------
+
+    if photo.get("event_id") != face.event_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="La photo n'appartient pas à cet événement"
         )
 
-    # Création du document MongoDB
+    # --------------------------------------------------------
+    # Vérifier que l'événement appartient au photographe
+    # --------------------------------------------------------
+    #
+    # La face n'a PAS de photographer_id.
+    # On vérifie donc le propriétaire via l'événement.
+    #
+
+    user_id = str(current_user["_id"])
+
+    if event.get("photographer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas accès à cet événement"
+        )
+
+    # --------------------------------------------------------
+    # Création du document
+    # --------------------------------------------------------
+
     face_data = face.model_dump()
 
-    result = faces_collection.insert_one(
-        face_data
-    )
+    result = faces_collection.insert_one(face_data)
 
     face_data["_id"] = result.inserted_id
 
     return face_to_response(face_data)
 
-# Récupérer une photo
+
+# ============================================================
+# RÉCUPÉRER LES FACES D'UNE PHOTO
+# ============================================================
+
 @router.get(
     "/photo/{photo_id}",
     response_model=list[FaceResponse]
@@ -143,29 +163,19 @@ def get_faces_by_photo(
     photo_id: str,
     current_user=Depends(get_current_user)
 ):
+
     if not ObjectId.is_valid(photo_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ID photo invalide"
         )
 
-    user_id = str(current_user["_id"])
-
-    photographer = photographers_collection.find_one({
-        "user_id": user_id
-    })
-
-    if not photographer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profil photographe introuvable"
-        )
-
-    photographer_id = str(photographer["_id"])
+    # --------------------------------------------------------
+    # Récupérer la photo
+    # --------------------------------------------------------
 
     photo = photos_collection.find_one({
-        "_id": ObjectId(photo_id),
-        "photographer_id": photographer_id
+        "_id": ObjectId(photo_id)
     })
 
     if not photo:
@@ -173,6 +183,50 @@ def get_faces_by_photo(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Photo introuvable"
         )
+
+    event_id = photo.get("event_id")
+
+    if not event_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cette photo n'est associée à aucun événement"
+        )
+
+    # --------------------------------------------------------
+    # Récupérer l'événement
+    # --------------------------------------------------------
+
+    if not ObjectId.is_valid(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID événement invalide"
+        )
+
+    event = events_collection.find_one({
+        "_id": ObjectId(event_id)
+    })
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Événement introuvable"
+        )
+
+    # --------------------------------------------------------
+    # Vérifier le propriétaire
+    # --------------------------------------------------------
+
+    user_id = str(current_user["_id"])
+
+    if event.get("photographer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas accès à cette photo"
+        )
+
+    # --------------------------------------------------------
+    # Récupérer les faces
+    # --------------------------------------------------------
 
     faces = faces_collection.find({
         "photo_id": photo_id
@@ -186,7 +240,11 @@ def get_faces_by_photo(
         for face in faces
     ]
 
-# Récupérer toutes les faces d'un événement
+
+# ============================================================
+# RÉCUPÉRER TOUTES LES FACES D'UN ÉVÉNEMENT
+# ============================================================
+
 @router.get(
     "/event/{event_id}",
     response_model=list[FaceResponse]
@@ -195,29 +253,19 @@ def get_faces_by_event(
     event_id: str,
     current_user=Depends(get_current_user)
 ):
+
     if not ObjectId.is_valid(event_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ID événement invalide"
         )
 
-    user_id = str(current_user["_id"])
-
-    photographer = photographers_collection.find_one({
-        "user_id": user_id
-    })
-
-    if not photographer:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Profil photographe introuvable"
-        )
-
-    photographer_id = str(photographer["_id"])
+    # --------------------------------------------------------
+    # Récupérer l'événement
+    # --------------------------------------------------------
 
     event = events_collection.find_one({
-        "_id": ObjectId(event_id),
-        "photographer_id": photographer_id
+        "_id": ObjectId(event_id)
     })
 
     if not event:
@@ -226,9 +274,24 @@ def get_faces_by_event(
             detail="Événement introuvable"
         )
 
+    # --------------------------------------------------------
+    # Vérifier le propriétaire
+    # --------------------------------------------------------
+
+    user_id = str(current_user["_id"])
+
+    if event.get("photographer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas accès à cet événement"
+        )
+
+    # --------------------------------------------------------
+    # Récupérer les faces
+    # --------------------------------------------------------
+
     faces = faces_collection.find({
-        "event_id": event_id,
-        "photographer_id": photographer_id
+        "event_id": event_id
     }).sort(
         "created_at",
         -1
@@ -239,3 +302,72 @@ def get_faces_by_event(
         for face in faces
     ]
 
+
+# ============================================================
+# RÉCUPÉRER UNE FACE PAR SON ID
+# ============================================================
+
+@router.get(
+    "/{face_id}",
+    response_model=FaceResponse
+)
+def get_face(
+    face_id: str,
+    current_user=Depends(get_current_user)
+):
+
+    if not ObjectId.is_valid(face_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID face invalide"
+        )
+
+    # --------------------------------------------------------
+    # Récupérer la face
+    # --------------------------------------------------------
+
+    face = faces_collection.find_one({
+        "_id": ObjectId(face_id)
+    })
+
+    if not face:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Face introuvable"
+        )
+
+    # --------------------------------------------------------
+    # Vérifier l'événement
+    # --------------------------------------------------------
+
+    event_id = face.get("event_id")
+
+    if not event_id or not ObjectId.is_valid(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Événement associé invalide"
+        )
+
+    event = events_collection.find_one({
+        "_id": ObjectId(event_id)
+    })
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Événement introuvable"
+        )
+
+    # --------------------------------------------------------
+    # Vérifier le propriétaire
+    # --------------------------------------------------------
+
+    user_id = str(current_user["_id"])
+
+    if event.get("photographer_id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Vous n'avez pas accès à cette face"
+        )
+
+    return face_to_response(face)

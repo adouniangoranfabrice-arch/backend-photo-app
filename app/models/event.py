@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 class EventModel(BaseModel):
-    photographer_id: str
+    user_id: str
 
     name: str = Field(
         ...,

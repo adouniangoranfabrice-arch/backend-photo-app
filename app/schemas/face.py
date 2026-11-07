@@ -8,7 +8,6 @@ class FaceResponse(BaseModel):
 
     photo_id: str
     event_id: str
-    photographer_id: str
 
     person_id: str | None = None
 
