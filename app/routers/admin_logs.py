@@ -107,7 +107,9 @@
 #         ]
 #     }
 
-from fastapi import APIRouter, Depends
+from math import ceil
+
+from fastapi import APIRouter, Depends, Query
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -125,40 +127,56 @@ router = APIRouter(
 )
 
 
-def get_user_name(user_id: str | None) -> str:
-    """Récupère le nom de l'utilisateur associé à une activité."""
-
-    if not user_id:
-        return "Système"
-
-    try:
-        object_id = ObjectId(user_id)
-    except (InvalidId, TypeError):
-        return "Utilisateur"
-
-    user = users_collection.find_one({
-        "_id": object_id
-    })
-
-    if not user:
-        return "Utilisateur"
-
-    firstname = user.get("firstname", "")
-    lastname = user.get("lastname", "")
-
-    full_name = f"{firstname} {lastname}".strip()
-
-    return full_name or "Utilisateur"
+# Champs réellement utilisés : on évite de transférer le reste
+ACTIVITY_FIELDS = {
+    "user_id": 1,
+    "photographer_id": 1,
+    "action": 1,
+    "resource": 1,
+    "resource_id": 1,
+    "description": 1,
+    "target": 1,
+    "metadata": 1,
+    "created_at": 1,
+}
 
 
-def activity_to_response(activity: dict) -> dict:
+def get_user_names(user_ids: set[str]) -> dict[str, str]:
+    """Récupère les noms de plusieurs utilisateurs en UNE seule requête."""
+
+    object_ids = []
+    for user_id in user_ids:
+        try:
+            object_ids.append(ObjectId(user_id))
+        except (InvalidId, TypeError):
+            continue
+
+    if not object_ids:
+        return {}
+
+    users = users_collection.find(
+        {"_id": {"$in": object_ids}},
+        {"firstname": 1, "lastname": 1},
+    )
+
+    names = {}
+    for user in users:
+        full_name = f"{user.get('firstname', '')} {user.get('lastname', '')}".strip()
+        names[str(user["_id"])] = full_name or "Utilisateur"
+
+    return names
+
+
+def activity_to_response(activity: dict, names: dict[str, str]) -> dict:
     """Transforme une activité MongoDB en réponse JSON."""
+
+    user_id = activity.get("user_id")
 
     return {
         "id": str(activity["_id"]),
-        "user_id": activity.get("user_id"),
+        "user_id": user_id,
         "photographer_id": activity.get("photographer_id"),
-        "user_name": get_user_name(activity.get("user_id")),
+        "user_name": names.get(user_id, "Utilisateur") if user_id else "Système",
         "action": activity.get("action"),
         "resource": activity.get("resource"),
         "resource_id": activity.get("resource_id"),
@@ -170,27 +188,39 @@ def activity_to_response(activity: dict) -> dict:
 
 
 @router.get("/recent")
-def get_all_activities(
+def get_recent_activities(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=100),
     current_user=Depends(
         require_role(UserRole.ADMIN.value)
     ),
 ):
     """
-    Retourne toutes les activités enregistrées,
-    de la plus récente à la plus ancienne.
-    Réservé aux administrateurs.
+    Activités de la plateforme, de la plus récente à la plus ancienne,
+    paginées côté serveur. Réservé aux administrateurs.
     """
 
-    activities = (
+    total = activity_logs_collection.estimated_document_count()
+
+    activities = list(
         activity_logs_collection
-        .find({})
-        .sort("created_at", -1)
+        .find({}, ACTIVITY_FIELDS)
+        .sort("created_at", -1)   # utilise l'index created_at
+        .skip((page - 1) * limit)
+        .limit(limit)
     )
 
+    names = get_user_names({
+        a["user_id"] for a in activities if a.get("user_id")
+    })
+
     return {
-        "total": activity_logs_collection.count_documents({}),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": max(1, ceil(total / limit)),
         "activities": [
-            activity_to_response(activity)
+            activity_to_response(activity, names)
             for activity in activities
         ],
     }

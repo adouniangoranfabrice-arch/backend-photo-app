@@ -20,6 +20,8 @@ events_collection = database["events"]
 photos_collection = database["photos"]
 faces_collection = database["faces"]
 activity_logs_collection = database["activity_logs"]
+# Recherches par selfie et téléchargements effectués sur les galeries publiques
+gallery_stats_collection = database["gallery_stats"]
 
 
 activity_logs_collection.create_index(
@@ -41,6 +43,15 @@ activity_logs_collection.create_index(
 activity_logs_collection.create_index(
     [("resource", 1)]
 )
+
+gallery_stats_collection.create_index(
+    [("user_id", 1), ("type", 1), ("created_at", -1)]
+)
+
+photos_collection.create_index([("user_id", 1), ("created_at", -1)])
+events_collection.create_index([("user_id", 1), ("created_at", -1)])
+faces_collection.create_index([("event_id", 1)])
+
 
 def get_database():
     return database

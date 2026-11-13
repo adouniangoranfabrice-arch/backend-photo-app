@@ -20,11 +20,15 @@ from fastapi import (
     Response
 )
 
+from fastapi.concurrency import run_in_threadpool
+
 from app.core.database import (
     events_collection,
     photos_collection,
     users_collection,
+    faces_collection,
 )
+from app.services.face_service import index_photo_faces
 
 from app.dependencies.auth import require_role
 from app.models.users import UserRole
@@ -361,12 +365,35 @@ async def upload_photos(
 
             created_photos.append(photo)
 
+            # 9 bis. Détecter et enregistrer les visages de la photo.
+            # Exécuté dans un thread pour ne pas bloquer le serveur.
+            # Une erreur de détection n'annule jamais l'import.
+            try:
+                faces_count = await run_in_threadpool(
+                    index_photo_faces,
+                    faces_collection=faces_collection,
+                    photos_collection=photos_collection,
+                    photo_id=str(photo["_id"]),
+                    event_id=event_id,
+                    image_bytes=file_content,
+                )
+                photo["faces_count"] = faces_count
+            except Exception as face_error:
+                print(
+                    f"[FACES] Détection impossible pour {file.filename} : "
+                    f"{face_error}",
+                    flush=True,
+                )
+
     except Exception as e:
         # 10. Annuler les documents MongoDB créés
         for photo in created_photos:
             try:
                 photos_collection.delete_one({
                     "_id": photo["_id"]
+                })
+                faces_collection.delete_many({
+                    "photo_id": str(photo["_id"])
                 })
             except Exception:
                 pass
@@ -614,6 +641,11 @@ def delete_photo(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Photo introuvable.",
         )
+
+    # Supprimer les visages détectés sur cette photo
+    faces_collection.delete_many({
+        "photo_id": photo_id,
+    })
 
     # =====================================================
     # 7. ENREGISTRER L'ACTIVITÉ

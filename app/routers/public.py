@@ -1,7 +1,25 @@
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
+from datetime import datetime, timezone
+
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+
 from app.core.database import (
     events_collection,
-    photos_collection
+    photos_collection,
+    faces_collection,
+    gallery_stats_collection,
+)
+from app.services.face_service import (
+    find_matching_photos,
+    largest_face_embedding,
 )
 
 router = APIRouter(
@@ -95,3 +113,162 @@ def get_public_event(
         "photos": photos,
         "photos_count": len(photos)
     }
+
+
+# ============================================================
+# RETROUVER SES PHOTOS GRÂCE À UN SELFIE
+# ============================================================
+#
+# Le selfie est analysé en mémoire puis oublié :
+# il n'est jamais enregistré (ni sur disque, ni en base, ni sur Cloudinary).
+#
+
+SELFIE_MAX_SIZE = 8 * 1024 * 1024  # 8 Mo
+
+SELFIE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+
+@router.post("/events/{public_token}/face-search")
+async def face_search(
+    public_token: str,
+    selfie: UploadFile = File(...),
+):
+    # 1. Vérifier l'événement public
+    event = events_collection.find_one(
+        {
+            "public_token": public_token,
+            "is_public": True,
+            "status": "ACTIVE",
+        },
+        {"_id": 1, "user_id": 1},
+    )
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Événement introuvable ou non public",
+        )
+
+    event_id = str(event["_id"])
+
+    # 2. Vérifier le selfie
+    if selfie.content_type not in SELFIE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Format non autorisé. Utilisez JPG, PNG ou WEBP.",
+        )
+
+    content = await selfie.read()
+
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image vide.",
+        )
+
+    if len(content) > SELFIE_MAX_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="L'image ne doit pas dépasser 8 Mo.",
+        )
+
+    # 3. Extraire le visage du selfie (dans un thread : calcul lourd)
+    try:
+        embedding = await run_in_threadpool(largest_face_embedding, content)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Impossible de lire l'image.",
+        )
+
+    if embedding is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Aucun visage détecté. Placez votre visage bien en face, "
+                "dans un endroit éclairé, puis réessayez."
+            ),
+        )
+
+    # 4. Comparer avec les visages de l'événement
+    matches = await run_in_threadpool(
+        find_matching_photos,
+        faces_collection=faces_collection,
+        event_id=event_id,
+        query_embedding=embedding,
+    )
+
+    indexed_photos = photos_collection.count_documents({
+        "event_id": event_id,
+        "status": "ACTIVE",
+        "faces_indexed": {"$exists": True},
+    })
+
+    # 5. Réponse (uniquement des identifiants de photos, aucun embedding)
+    results = sorted(
+        (
+            {"photo_id": photo_id, "similarity": round(score, 3)}
+            for photo_id, score in matches.items()
+        ),
+        key=lambda item: item["similarity"],
+        reverse=True,
+    )
+
+    # 6. Statistiques du photographe (aucune donnée du selfie n'est conservée)
+    record_gallery_stat(
+        event=event,
+        stat_type="FACE_SEARCH",
+        count=1,
+        matches=len(results),
+    )
+
+    return {
+        "matches": results,
+        "count": len(results),
+        "indexed_photos": indexed_photos,
+    }
+
+
+def record_gallery_stat(*, event: dict, stat_type: str, count: int, **extra):
+    """Enregistre une recherche ou un téléchargement, sans jamais bloquer l'invité."""
+
+    try:
+        gallery_stats_collection.insert_one({
+            "event_id": str(event["_id"]),
+            "user_id": event.get("user_id"),
+            "type": stat_type,
+            "count": count,
+            "created_at": datetime.now(timezone.utc),
+            **extra,
+        })
+    except Exception as exc:  # les statistiques ne doivent jamais casser la galerie
+        print(f"[stats] Enregistrement impossible : {exc}", flush=True)
+
+
+class DownloadStat(BaseModel):
+    count: int = Field(ge=1, le=5000)
+
+
+@router.post(
+    "/events/{public_token}/downloads",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def track_download(public_token: str, data: DownloadStat):
+    """Appelé par la galerie quand un invité télécharge des photos."""
+
+    event = events_collection.find_one(
+        {"public_token": public_token, "is_public": True, "status": "ACTIVE"},
+        {"_id": 1, "user_id": 1},
+    )
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Événement introuvable ou non public",
+        )
+
+    record_gallery_stat(event=event, stat_type="DOWNLOAD", count=data.count)

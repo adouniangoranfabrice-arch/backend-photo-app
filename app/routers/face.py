@@ -6,6 +6,7 @@ from fastapi import (
 )
 
 from bson import ObjectId
+import requests
 
 from app.core.database import (
     faces_collection,
@@ -16,6 +17,12 @@ from app.core.database import (
 from app.dependencies.auth import get_current_user
 from app.schemas.face import FaceResponse
 from app.models.face import FaceModel
+from app.dependencies.auth import require_role
+from app.models.users import UserRole
+from app.services.face_service import (
+    FACE_MODEL_NAME,
+    index_photo_faces,
+)
 
 
 router = APIRouter(
@@ -371,3 +378,98 @@ def get_face(
         )
 
     return face_to_response(face)
+
+# ============================================================
+# INDEXER LES VISAGES DES PHOTOS D'UN ÉVÉNEMENT
+# ============================================================
+#
+# Analyse les photos importées avant l'ajout de la reconnaissance
+# faciale (ou après un changement de modèle). Les photos déjà
+# indexées avec le modèle actuel sont ignorées, sauf si force=true.
+#
+
+def _analysis_url(file_url: str) -> str:
+    """Version réduite de l'image Cloudinary (plus rapide à télécharger)."""
+    if "/image/upload/" in file_url:
+        return file_url.replace(
+            "/image/upload/",
+            "/image/upload/w_1600,h_1600,c_limit,q_auto/",
+            1,
+        )
+    return file_url
+
+
+@router.post("/events/{event_id}/index")
+def index_event_faces(
+    event_id: str,
+    force: bool = False,
+    current_user=Depends(
+        require_role(UserRole.PHOTOGRAPHER.value)
+    ),
+):
+    if not ObjectId.is_valid(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID événement invalide"
+        )
+
+    user_id = str(current_user["_id"])
+
+    event = events_collection.find_one({
+        "_id": ObjectId(event_id),
+        "user_id": user_id,
+    })
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Événement introuvable ou accès non autorisé"
+        )
+
+    query = {"event_id": event_id, "status": "ACTIVE"}
+
+    if not force:
+        query["faces_indexed"] = {"$ne": FACE_MODEL_NAME}
+
+    photos = list(photos_collection.find(
+        query,
+        {"file_url": 1}
+    ))
+
+    indexed = 0
+    faces_found = 0
+    failed = 0
+
+    for photo in photos:
+        file_url = photo.get("file_url")
+
+        if not file_url:
+            failed += 1
+            continue
+
+        try:
+            response = requests.get(_analysis_url(file_url), timeout=30)
+            response.raise_for_status()
+
+            faces_found += index_photo_faces(
+                faces_collection=faces_collection,
+                photos_collection=photos_collection,
+                photo_id=str(photo["_id"]),
+                event_id=event_id,
+                image_bytes=response.content,
+            )
+            indexed += 1
+
+        except Exception as error:
+            failed += 1
+            print(
+                f"[FACES] Indexation impossible ({photo['_id']}) : {error}",
+                flush=True,
+            )
+
+    return {
+        "message": "Indexation terminée",
+        "photos_indexed": indexed,
+        "faces_found": faces_found,
+        "failed": failed,
+    }
